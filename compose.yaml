@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      MEMCACHED_HOST: memcached
+    depends_on:
+      - memcached
+    command: sleep infinity
+
+  memcached:
+    image: memcached:1.6-alpine
