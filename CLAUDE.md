@@ -18,6 +18,7 @@ docker compose run --rm app php artisan test           # whole suite (~0.5 s)
 docker compose run --rm app php artisan test --filter=NationalityCacheTest            # one class
 docker compose run --rm app php artisan test --filter=test_entries_live_for_exactly_24_hours   # one test
 docker compose run --rm --no-deps app vendor/bin/pint # format (Laravel Pint)
+docker compose up -d serve                             # dev server on http://localhost:18080 (APP_PORT=9000 to change the host port); uses the real key in .env
 ```
 
 `MemcachedIntegrationTest` skips itself when no memcached is reachable. The suite never contacts the real Nationalize.io: `tests/TestCase.php` calls `Http::preventStrayRequests()`, so any request not covered by `Http::fake()` fails the test.

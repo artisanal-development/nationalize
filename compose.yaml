@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    image: nationalize-dev
     working_dir: /app
     volumes:
       - .:/app
@@ -9,6 +10,22 @@ services:
     depends_on:
       - memcached
     command: sleep infinity
+
+  # Development web server: `docker compose up serve`, then http://localhost:18080.
+  # Pick another host port if 18080 is taken: `APP_PORT=9000 docker compose up serve`.
+  serve:
+    build: .
+    image: nationalize-dev
+    working_dir: /app/public
+    volumes:
+      - .:/app
+    environment:
+      MEMCACHED_HOST: memcached
+    ports:
+      - "${APP_PORT:-18080}:8000"
+    depends_on:
+      - memcached
+    command: php -S 0.0.0.0:8000 ../vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php
 
   memcached:
     image: memcached:1.6-alpine
