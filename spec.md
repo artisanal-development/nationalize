@@ -28,7 +28,7 @@ A new Laravel application exposing one unauthenticated endpoint, `POST /national
 | ID | Requirement |
 |----|-------------|
 | FR-1 | `POST /nationalize` accepts a JSON body `{"names": [string, ...]}`. |
-| FR-2 | `names` is required, a list (not an object), 1–5 items. |
+| FR-2 | `names` is required, a JSON array (not an object), 1–5 items. |
 | FR-3 | Every item must be a string that is non-empty after trimming and at most **50 characters** **[Decided]**. Non-strings (numbers, null, bool, arrays, objects) and empty/whitespace-only strings are rejected with 422. Validation is strict: no coercion before validation (§6.2). |
 | FR-4 | Normalization **[Decided]**: each name is trimmed, Unicode-normalized to NFC, and has internal runs of whitespace collapsed to a single space. The normalized form is what is used for deduplication, cache keys and the upstream request. |
 | FR-5 | Duplicates are permitted in the input. The response contains one result per input item, **in input order**, including duplicates. Items that normalize identically (e.g. `Mario`, `mario`, `"Mario  "`) are treated as the same name. |
@@ -49,6 +49,8 @@ A new Laravel application exposing one unauthenticated endpoint, `POST /national
 ```
 app/Http/Controllers/NationalizeController.php   thin: validate → service → resource
 app/Http/Requests/NationalizeRequest.php         validation + normalization
+app/Http/Middleware/RejectMalformedJson.php      400 for malformed JSON bodies
+app/Support/NameNormalizer.php                   trim/NFC/whitespace collapse + cache key
 app/Services/NationalityLookup.php               cache orchestration, batching, merge
 app/Services/NationalizeClient.php               HTTP client for Nationalize.io only
 app/Http/Resources/NationalityResource.php       output shaping (percent strings, top-5)
@@ -77,7 +79,7 @@ tests/Unit/NationalityLookupTest.php
 - **Cache unavailable [Decided: fail open]:** if memcached errors, treat as a miss and call upstream; log a warning without names. Quota may be consumed faster during an outage.
 
 ### 4.4 Upstream client
-- `Http::timeout(5)->acceptJson()->get(...)` with `name` passed as an array so Laravel builds `name[]=` params. Timeout is config-driven (`services.nationalize.timeout`).
+- `Http::timeout(5)->acceptJson()->get($url)` where the client **builds the query string itself** (`name[]=a&name[]=b&apikey=…`, each value `rawurlencode`d). Passing `['name' => [...]]` to `get()` would make Laravel emit indexed `name[0]=a` keys instead of the documented `name[]=`. Guzzle sends the brackets percent-encoded (`name%5B%5D=a`); a live call confirmed the real API accepts that form. Timeout is config-driven (`services.nationalize.timeout`).
 - **Retry only on connection errors and 5xx**, with at most one retry and short backoff. Never retry 4xx/429 (that spends quota on calls that will fail).
 - **Result mapping [Decided]: by position.** Upstream docs state "the response is an array in the same order as the input" for batch requests. If the length differs from the number of names sent, or any record is malformed, throw → 502. Always send `name[]` (even for one name): live tests confirmed `name[]=x` returns a one-element array, while plain `name=x` returns a bare object. Still treat a bare object defensively (wrap it) in case upstream changes.
 - Upstream errors are JSON `{"error": "..."}` with these mappings (upstream messages are never forwarded to callers):
@@ -144,7 +146,7 @@ Normalization runs in `prepareForValidation()` **only on string items**, so `123
 
 ### 6.2 Laravel behaviours to handle and test
 - `TrimStrings` and `ConvertEmptyStringsToNull` are global middleware in current Laravel and run before validation. Either rely on them knowingly (`""` becomes null and fails `required`) or exclude `names` from them; in both cases `"   "` must be rejected after trimming. Tests assert the outcome, not the mechanism.
-- `{"names": {"a": "x"}}` (object) must be rejected (`list` rule).
+- `{"names": {"a": "x"}}` (JSON object) must be rejected. PHP's `array` rule also accepts JSON objects, so Laravel's `list` rule is added to require a plain JSON array.
 - `{"names": "Mario"}` (string, not array) → 422.
 - Items that are `true`, `1`, `null`, `[]`, `{}` → 422.
 - Unicode names such as `"Núñez"` and `"李"` are valid; emit as UTF-8 and URL-encode upstream. Composed and decomposed forms of the same name must produce the same cache key (NFC).
@@ -174,9 +176,10 @@ These were decided with the author and should be copied into `intent.md` (it has
 
 ## 9. Remaining open items
 **Verification against Nationalize.io** (official docs at nationalize.io/documentation/api/reference plus live keyless calls, 2026-11-18):
-- **V1 (closed):** Docs state batch responses are an array in input order. Live: `name[]=michael&name[]=nguyen&name[]=schmidt` returned records in that order; `name[]=michael` returned a one-element array; `name=michael` returned a bare object. A reversed-order call was refused by the free quota, so order was verified on one ordering only plus the documented guarantee.
+- **V1 (closed):** Docs state batch responses are an array in input order. Live: `name[]=michael&name[]=nguyen&name[]=schmidt` returned records in that order; `name[]=michael` returned a one-element array; `name=michael` returned a bare object. With an API key, a forward batch (`nguyen,michael,schmidt`) and its reverse (`schmidt,michael,nguyen`) each came back in exactly the order sent, so position mapping is verified.
 - **V2 (closed):** Max 100 names per request (our cap of 5 is well within it). Quota is counted **per name**, monthly; a batch of N consumes N. Free-tier limits and pricing are on a separate pricing page and were not retrieved; a 402 implies a paid subscription for keyed use. Cache hits therefore save quota directly.
-- **V3 (closed for ASCII):** Live: `Michael`, `michael` and `MICHAEL` returned identical counts and probabilities, and each record echoes `name` exactly as sent. The case-folded cache key is supported. Non-ASCII case folding (e.g. `É` vs `é`) was not tested.
+- **V3 (closed):** Live: `Michael`, `michael` and `MICHAEL` returned identical counts and probabilities, and each record echoes `name` exactly as sent. Non-ASCII folds the same way: `Émile` and `émile` both returned count 29017 and identical countries. The case-folded cache key is supported.
+- **Live end-to-end run (keyed, 2026-11-18):** quota counted per name as documented. A request with `["Michael","  nguyen ","michael","Garcia"]` spent 3 names (the two `Michael` spellings were one); an immediate repeat in different case spent 0; a request adding one new name spent 1. An unknown name returned null fields; a wrong key gave 503 with a logged error and no key in logs or responses.
 - **Also observed live:** an unknown name returns `{"count":0,"name":"...","country":[]}` (matches §4.5). Without an API key the free allowance was only **10 names per window** (`X-Rate-Limit-Limit: 10`, reset about 4 hours), counted per name; so integration tests must use `Http::fake()` and never hit the live API.
 - **V4 (closed):** The API key is passed only as an `apikey` query parameter; no header alternative is documented. Conflict C.4 (key in URL) therefore stays, and redaction (§4.4) is mandatory.
 
@@ -203,6 +206,6 @@ Feature tests use `Http::fake()` and the `array` cache driver (plus one integrat
 - Log-capture test: no name and no `apikey` string appears in logs or error bodies.
 
 ## 11. Delivery notes
-- Scaffold: `composer create-project laravel/laravel .` (repo currently has no source). Then update `CLAUDE.md` "Current state" with real build/test/lint commands, as it instructs.
-- Requires the PHP `memcached` extension and a memcached instance (add to `docker-compose`/CI). Confirm PHP and Composer are available in the dev sandbox first.
+- Implemented on Laravel 13 / PHP 8.4. The dev sandbox has no PHP, so development and tests run in Docker (`Dockerfile`, `compose.yaml`: Debian PHP CLI with `intl` and `memcached`, plus a memcached service). Commands are in `CLAUDE.md`.
+- Requires the PHP `memcached` and `intl` extensions and a memcached instance.
 - Suggested slices: (1) scaffold + route + validation + tests, (2) client + output shaping, (3) cache layer, (4) redaction and log tests.
