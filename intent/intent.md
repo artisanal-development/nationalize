@@ -23,8 +23,8 @@ GET https://api.nationalize.io/?name[]=nguyen&name[]=schmidt&name[]=garcia&apike
 - there will be a minimum of 1 name in the list of names.
 - there will be a maximum of 5 names in the list of names.
 - Empty strings and non-string values in the list of names must be rejected.
-- The list of names may contain duplicates.  A name in the list should not be sent to the Nationalize.io API.  The application will first check a cache to see if the name was recently used, and if so, will used the cached value instead of calling the Nationalize.io API.  This cache will be implemented using memcached.  The TTL for the entries in the cache will be 24 hours.
-- other than the cache, the system will persist or retain the results.
+- The list of names may contain duplicates.  A name in the list should not be sent to the Nationalize.io API more than once.  The application will first check a cache to see if the name was recently used, and if so, will used the cached value instead of calling the Nationalize.io API.  This cache will be implemented using memcached.  The TTL for the entries in the cache will be 24 hours.
+- other than the cache, the system will not persist or retain the results.
 - Names may include whitespace.  Leading or trailing whitespace should be removed before calling the Nationalize.io API.
 - the expected output will be in JSON format, where each name has the fully ranked list of countries sorted by probability in descending order, and key-values for the most probable country and it's probability.  An example of the expected output is:
 ```json
